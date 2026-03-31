@@ -1,4 +1,4 @@
-﻿"""
+"""
 normalize_utf8.py
 -----------------
 Converts all text-based source files in a codebase to UTF-8 encoding.
