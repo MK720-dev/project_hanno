@@ -10,16 +10,12 @@ This file implements the step-by-step interaction loop between:
 - the diagnostics trace,
 - and the controller-facing observation builder.
 
-Important conceptual boundary
------------------------------
-This environment does not train the controller.
-It only:
-- runs the inner optimizee dynamics,
-- consumes controller-produced control,
-- computes reward,
-- and returns the next observation.
-
-Controller training via REINFORCE/PPO belongs to the outer RL training layer.
+MNIST extension note
+--------------------
+Some tasks, such as MNIST, need per-step dataset progression. To support that
+without redesigning the whole interface, the environment now checks whether the
+task exposes an optional `advance(task_state)` method and calls it after each
+completed step.
 """
 
 from __future__ import annotations
@@ -30,6 +26,7 @@ from typing import Any
 import torch
 
 from hanno.core.types import ControlOutput
+from hanno.core.utils import get_optimizee_device
 from hanno.environment.diagnostics import DiagnosticsTrace, compute_step_diagnostics
 from hanno.environment.observation import ObservationBuilder
 from hanno.environment.reward import BaseReward, RewardInfo
@@ -39,7 +36,9 @@ from hanno.tasks.base import BaseTask
 
 @dataclass
 class EnvStepResult:
-    """Structured result returned by one environment step."""
+    """
+    Structured result returned by one environment step.
+    """
 
     observation: torch.Tensor
     reward: float
@@ -50,10 +49,6 @@ class EnvStepResult:
 class TrainingEnv:
     """
     Gym-like environment for one controlled optimizee episode.
-
-    This follows the restricted HannoNet1 loop:
-    controller -> control -> update engine -> optimizee/loss ->
-    reward + diagnostics -> next observation
     """
 
     def __init__(
@@ -77,13 +72,6 @@ class TrainingEnv:
     def reset(self, seed: int | None = None) -> tuple[torch.Tensor, dict[str, Any]]:
         """
         Reset the environment to a fresh optimizee episode.
-
-        The reset:
-        1. creates a fresh task state,
-        2. binds a fresh optimizer to the new optimizee parameters,
-        3. computes the initial loss,
-        4. initializes the diagnostics trace,
-        5. returns the initial controller observation.
         """
 
         self.task_state = self.task.reset(seed=seed)
@@ -93,10 +81,9 @@ class TrainingEnv:
 
         initial_loss = self.task.compute_loss(self.task_state)
 
-        # At reset time, there is no gradient/update yet, so zeros are used.
         initial_diag = compute_step_diagnostics(
             loss=initial_loss,
-            parameters=self.task_state.parameters.detach(),
+            parameters=self.task_state.parameters,
             gradient=None,
             update=None,
             lr_effective=self.update_engine.base_lr,
@@ -109,7 +96,7 @@ class TrainingEnv:
             trace=self.trace,
             step_index=self.task_state.step_index,
             horizon=self.task.horizon,
-            device=self.task_state.parameters.device,
+            device=get_optimizee_device(self.task_state.parameters),
         )
 
         info = {
@@ -123,10 +110,6 @@ class TrainingEnv:
     def step(self, control: ControlOutput) -> tuple[torch.Tensor, float, bool, dict[str, Any]]:
         """
         Apply one controller-guided optimizee step.
-
-        The environment step updates the optimizee, not the controller.
-        The controller is trained later by the outer RL algorithm using
-        rewards collected from repeated calls to this method.
         """
 
         if self.done:
@@ -144,8 +127,6 @@ class TrainingEnv:
 
         previous_loss = self.trace.latest_loss()
 
-        # Inner-loop optimizee update. This is where the update engine applies
-        # the controller-guided step to the optimizee.
         update_result = self.update_engine.step(
             task_state=self.task_state,
             control=control,
@@ -153,18 +134,14 @@ class TrainingEnv:
         )
 
         self.task_state.step_index += 1
-
-        # Recompute the post-step optimizee loss so the environment can define
-        # the new state, reward, and diagnostics.
         post_step_loss = self.task.compute_loss(self.task_state).detach()
 
         if not torch.isfinite(post_step_loss):
             self.done = True
-
             fallback_observation = torch.zeros(
                 10,
                 dtype=torch.float32,
-                device=self.task_state.parameters.device,
+                device=get_optimizee_device(self.task_state.parameters),
             )
 
             info = {
@@ -183,13 +160,11 @@ class TrainingEnv:
                 ),
             }
 
-            # Strong negative terminal reward so the controller learns that this
-            # action/trajectory was bad, but we do not let inf/nan propagate.
             return fallback_observation, -10.0, True, info
 
         step_diag = compute_step_diagnostics(
             loss=post_step_loss,
-            parameters=self.task_state.parameters.detach(),
+            parameters=self.task_state.parameters,
             gradient=update_result.gradient,
             update=update_result.update_vector,
             lr_effective=update_result.lr_effective,
@@ -204,8 +179,13 @@ class TrainingEnv:
             trace=self.trace,
             step_index=self.task_state.step_index,
             horizon=self.task.horizon,
-            device=self.task_state.parameters.device,
+            device=get_optimizee_device(self.task_state.parameters),
         )
+
+        # Advance dataset-backed tasks to their next batch after the current
+        # step has been fully evaluated on the current batch.
+        if hasattr(self.task, "advance"):
+            self.task.advance(self.task_state)
 
         nonfinite_loss = not torch.isfinite(post_step_loss).item()
         reached_horizon = self.task_state.step_index >= self.task.horizon

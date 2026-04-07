@@ -1,40 +1,37 @@
 """
 Diagnostics helpers for Hanno optimization episodes.
 
-The restricted proof-of-concept implementation relies heavily on compact,
-interpretable diagnostics rather than raw parameter/state exposure. This file
-provides helper functions for computing the quantities that later become part
-of observations, reward logic, logging, and debugging.
-
-The focus here is on small numerical summaries such as:
+This file collects compact, interpretable optimizee-side summaries such as:
 - scalar loss,
 - gradient norm,
 - parameter norm,
 - update norm,
-- and a simple instability indicator.
+- effective learning rate,
+- instability flag.
 
-These summaries align well with the current project direction, where early
-experiments should remain traceable and easy to interpret.
+MNIST extension note
+--------------------
+The analytical-only prototype assumed a single optimizee parameter tensor. This
+version computes norms generically for either:
+- a single Parameter, or
+- a full nn.Module.
 """
 
 from __future__ import annotations
 
-from collections import deque
 from dataclasses import dataclass, field
 
 import torch
+from torch import nn
 
 from hanno.core.types import StepDiagnostics
+from hanno.core.utils import flatten_parameters
 
 
 @dataclass
 class DiagnosticsTrace:
     """
     Rolling trace of recent optimization statistics.
-
-    The environment can keep one of these per episode and update it after each
-    optimization step. A short rolling history is especially useful for
-    building observations and windowed rewards later.
     """
 
     losses: list[float] = field(default_factory=list)
@@ -58,15 +55,13 @@ class DiagnosticsTrace:
         return self.losses[-1] if self.losses else None
 
     def previous_loss(self) -> float | None:
-        """Return the previous loss if at least two losses have been recorded."""
+        """Return the previous loss if available."""
         return self.losses[-2] if len(self.losses) >= 2 else None
 
     def window_start_loss(self, window: int) -> float | None:
         """
-        Return the loss at the beginning of a given lookback window.
-
-        If the trace is shorter than the requested window, the earliest
-        available loss is returned instead.
+        Return the loss at t-k where k = window, clipped to the earliest
+        available element at the start of a rollout.
         """
 
         if not self.losses:
@@ -78,8 +73,6 @@ class DiagnosticsTrace:
 def tensor_l2_norm(tensor: torch.Tensor | None) -> float:
     """
     Return the Euclidean norm of a tensor as a Python float.
-
-    Returning a plain float makes the value easy to log and store.
     """
 
     if tensor is None:
@@ -90,7 +83,7 @@ def tensor_l2_norm(tensor: torch.Tensor | None) -> float:
 def compute_step_diagnostics(
     *,
     loss: torch.Tensor,
-    parameters: torch.Tensor,
+    parameters: nn.Module | nn.Parameter,
     gradient: torch.Tensor | None,
     update: torch.Tensor | None,
     lr_effective: float,
@@ -98,35 +91,14 @@ def compute_step_diagnostics(
     instability_threshold: float = 1.5,
 ) -> StepDiagnostics:
     """
-    Build a StepDiagnostics object from raw optimization quantities.
-
-    Parameters
-    ----------
-    loss:
-        Current scalar loss tensor.
-    parameters:
-        Current optimizee parameters after the step.
-    gradient:
-        Gradient tensor evaluated for the current step.
-    update:
-        Applied update vector, if known. In some early debugging scenarios this
-        may be unavailable, in which case the norm is recorded as zero.
-    lr_effective:
-        Effective learning rate used by the update engine after modulation.
-    previous_loss:
-        Previous step's scalar loss, used to define a simple instability flag.
-    instability_threshold:
-        Threshold c used in simple spike detection: loss_t > c * loss_{t-1}.
+    Build a StepDiagnostics object from raw optimizee quantities.
     """
 
     loss_value = float(loss.detach().item())
     grad_norm = tensor_l2_norm(gradient)
-    param_norm = tensor_l2_norm(parameters)
+    param_norm = tensor_l2_norm(flatten_parameters(parameters))
     update_norm = tensor_l2_norm(update)
 
-    # A minimal instability diagnostic: treat a sufficiently large upward spike
-    # in the loss as instability. This aligns with the simple penalty ideas
-    # discussed in the current project notes.
     instability_flag = False
     if previous_loss is not None and previous_loss > 0.0:
         instability_flag = loss_value > instability_threshold * previous_loss

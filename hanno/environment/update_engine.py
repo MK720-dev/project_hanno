@@ -3,25 +3,17 @@ Controlled optimizee update engine for Hanno / HannoNet1.
 
 Role in the framework
 ---------------------
-This file implements the inner-loop update mechanism that acts on the
-optimizee parameters. This is intentionally separate from REINFORCE or any
-other controller-training logic.
+This file implements the inner-loop update mechanism that acts on the optimizee.
+This remains intentionally separate from REINFORCE or any other controller-
+training logic.
 
-In HannoNet1:
-- the controller observes optimizee-side diagnostics,
-- the controller outputs optimizer-level control,
-- the update engine applies that control to a fixed optimizer backbone,
-- and the optimizee parameters are updated accordingly.
+MNIST extension note
+--------------------
+The update engine now supports optimizees that are either:
+- a single Parameter vector (analytical phase), or
+- a full nn.Module (MNIST and later CIFAR).
 
-The current restricted proof-of-concept design only uses optimizer-level
-learning-rate modulation. That means the controller does not replace SGD/Adam;
-it only steers the effective step size through a multiplier.
-
-Important conceptual boundary
------------------------------
-This file updates the optimizee.
-It does NOT update the controller.
-Controller updates belong to the outer RL training layer (e.g. REINFORCE).
+The controller still only modulates the effective learning rate in HannoNet1.
 """
 
 from __future__ import annotations
@@ -31,16 +23,13 @@ from dataclasses import dataclass
 import torch
 
 from hanno.core.types import ControlOutput, TaskState
+from hanno.core.utils import flatten_gradients, flatten_parameters, optimizee_parameters
 
 
 @dataclass
 class UpdateResult:
     """
     Result object returned after one controlled optimizee step.
-
-    Keeping this structured helps the environment avoid recomputing useful
-    quantities such as the gradient vector, the applied update, and the
-    effective learning rate.
     """
 
     loss: torch.Tensor
@@ -52,9 +41,6 @@ class UpdateResult:
 class UpdateEngine:
     """
     Fixed-backbone optimizee update engine with controller-driven modulation.
-
-    The backbone optimizer is conventional (SGD or Adam). The controller output
-    is used to modulate the effective learning rate via a positive multiplier.
     """
 
     def __init__(
@@ -71,9 +57,11 @@ class UpdateEngine:
         self._optimizer: torch.optim.Optimizer | None = None
 
     def bind(self, task_state: TaskState) -> None:
-        """Create and attach a fresh backbone optimizer to the current optimizee."""
+        """
+        Create and attach a fresh backbone optimizer to the current optimizee.
+        """
 
-        params = [task_state.parameters]
+        params = optimizee_parameters(task_state.parameters)
 
         if self.optimizer_name == "sgd":
             self._optimizer = torch.optim.SGD(params, lr=self.base_lr)
@@ -91,7 +79,9 @@ class UpdateEngine:
             )
 
     def _require_optimizer(self) -> torch.optim.Optimizer:
-        """Return the bound optimizer or raise an informative error."""
+        """
+        Return the bound optimizer or raise an informative error.
+        """
 
         if self._optimizer is None:
             raise RuntimeError(
@@ -108,21 +98,13 @@ class UpdateEngine:
     ) -> UpdateResult:
         """
         Apply one controlled optimizee update.
-
-        The returned loss corresponds to the loss value before the update.
-        The environment can then recompute the post-step loss explicitly.
         """
 
         optimizer = self._require_optimizer()
 
-        # Read the optimizer-level control. This is the main restricted-scope
-        # control channel in HannoNet1.
         lr_multiplier = float(control.optimizer_action.lr_multiplier)
-
-        # Convert the controller multiplier into an effective learning rate.
         lr_effective = self.base_lr * lr_multiplier
 
-        # Update every optimizer parameter group with the new effective LR.
         for group in optimizer.param_groups:
             group["lr"] = lr_effective
 
@@ -130,17 +112,12 @@ class UpdateEngine:
         loss = loss_closure()
         loss.backward()
 
-        # Clone the gradient now, before the optimizer mutates anything.
-        gradient = task_state.parameters.grad.detach().clone().flatten()
+        gradient = flatten_gradients(task_state.parameters)
+        old_parameters = flatten_parameters(task_state.parameters)
 
-        # Store the old parameters so we can recover the applied update vector.
-        old_parameters = task_state.parameters.detach().clone()
-
-        # Take one fixed-backbone optimizer step on the optimizee.
         optimizer.step()
 
-        # Recover the applied parameter delta for diagnostics.
-        update_vector = (task_state.parameters.detach() - old_parameters).flatten()
+        update_vector = flatten_parameters(task_state.parameters) - old_parameters
 
         return UpdateResult(
             loss=loss.detach(),

@@ -101,7 +101,8 @@ class TaskState:
     Attributes
     ----------
     parameters:
-        The optimizee parameters currently being trained or optimized.
+        The optimizee parameters currently being trained or optimized. The current optimizee object. In the analytical phase this is a single
+        Parameter vector. For MNIST/CIFAR it becomes a full nn.Module.
     step_index:
         Current time step inside the episode.
     metadata:
@@ -109,7 +110,7 @@ class TaskState:
         debugging. Examples include the task name, dimension, or curvature info.
     """
 
-    parameters: torch.nn.Parameter
+    parameters: torch.nn.Parameter | torch.nn.Parameter
     step_index: int = 0
     metadata: dict[str, Any] = field(default_factory=dict)
 

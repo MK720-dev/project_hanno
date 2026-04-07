@@ -230,11 +230,11 @@ def main() -> None:
         StageConfig(
             name="rosenbrock",
             task_factory=lambda: make_rosenbrock(
-                horizon=60,
+                horizon=200,
                 init_scale=1.2,
                 device=device,
             ),
-            episodes=50,
+            episodes=200,
             optimizer_name="adam",
             base_lr=0.001,
             min_lr_multiplier=0.5,
