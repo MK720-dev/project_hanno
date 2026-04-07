@@ -25,7 +25,12 @@ from hanno.environment.training_env import TrainingEnv
 from hanno.environment.update_engine import UpdateEngine
 from hanno.policy.hanno_net1 import HannoNet1
 from hanno.policy.reinforce import REINFORCETrainer
-from hanno.tasks.analytical import make_anisotropic_quadratic
+from hanno.tasks.analytical import (
+    make_isotropic_quadratic,
+    make_anisotropic_quadratic,
+    make_rosenbrock,
+    make_saddle,
+)
 
 
 def run_episode(env: TrainingEnv, policy: HannoNet1, seed: int) -> tuple[EpisodeTrajectory, dict]:
@@ -98,16 +103,36 @@ def main() -> None:
     device = "cpu"
 
     # Start with an anisotropic quadratic: simple, fast, and still informative.
-    task = make_anisotropic_quadratic(
+    """task = make_anisotropic_quadratic(
         diagonal_values=[1.0, 10.0],
         horizon=40,
         init_scale=1.5,
         device=device,
+    )"""
+
+    """task = make_isotropic_quadratic(
+        dimension=2,
+        curvature=1.0,
+        horizon=40,
+        init_scale=1.5,
+        device=device,
+    )"""
+
+    task = make_rosenbrock(
+        horizon=60,
+        init_scale=1.2,
+        device=device,
     )
+
+    """task = make_saddle(
+        horizon=40,
+        init_scale=1.5,
+        device=device,
+    )"""
 
     update_engine = UpdateEngine(
         optimizer_name="sgd",
-        base_lr=0.03,
+        base_lr=0.001,
     )
 
     reward_fn = WindowedLogImprovementWithInstabilityPenalty(
@@ -135,8 +160,8 @@ def main() -> None:
         observation_dim=observation_dim,
         hidden_dim=64,
         num_layers=2,
-        min_lr_multiplier=0.1,
-        max_lr_multiplier=3.0,
+        min_lr_multiplier=0.5,
+        max_lr_multiplier=1.25,
     ).to(device)
 
     trainer = REINFORCETrainer(
@@ -148,7 +173,7 @@ def main() -> None:
         grad_clip_norm=1.0,
     )
 
-    num_episodes = 25
+    num_episodes = 200
 
     for episode_idx in range(1, num_episodes + 1):
         episode_seed = 1000 + episode_idx
