@@ -258,6 +258,162 @@ class SaddleTask(BaseTask):
         """Return a compact summary of the saddle task."""
         return TaskInfo(name=self.name, horizon=self.horizon, metadata={})
 
+class ShiftedQuadraticTask(BaseTask):
+    """
+    Shifted quadratic objective of the form:
+
+        f(x) = 0.5 * (x - c)^T A (x - c)
+
+    where:
+    - c is the center / minimizer location,
+    - A is a positive diagonal curvature matrix.
+
+    Why this is useful
+    ------------------
+    The training quadratics used so far are centered at the origin. This held-
+    out objective tests whether the controller learned something about convex
+    optimization behavior in general, rather than overfitting to "the optimum
+    is always at zero."
+    """
+
+    def __init__(
+        self,
+        center: torch.Tensor,
+        diagonal: torch.Tensor,
+        config: AnalyticalTaskConfig,
+        name: str = "shifted_quadratic",
+    ) -> None:
+        if center.numel() != diagonal.numel():
+            raise ValueError("center and diagonal must have the same dimension.")
+
+        super().__init__(name=name, horizon=config.horizon)
+        self.center = center.to(device=config.device, dtype=config.dtype)
+        self.diagonal = diagonal.to(device=config.device, dtype=config.dtype)
+        self.config = config
+
+    def reset(self, seed: int | None = None) -> TaskState:
+        """
+        Sample a fresh initial point for the shifted quadratic objective.
+        """
+
+        generator = torch.Generator(device=self.config.device)
+        if seed is not None:
+            generator.manual_seed(seed)
+
+        x0 = self.config.init_scale * torch.randn(
+            self.config.dimension,
+            generator=generator,
+            device=self.config.device,
+            dtype=self.config.dtype,
+        )
+
+        return TaskState(
+            parameters=torch.nn.Parameter(x0),
+            step_index=0,
+            metadata={
+                "task_name": self.name,
+                "dimension": self.config.dimension,
+                "center": self.center.detach().cpu().tolist(),
+                "diagonal": self.diagonal.detach().cpu().tolist(),
+            },
+        )
+
+    def compute_loss(self, task_state: TaskState) -> torch.Tensor:
+        """
+        Compute the shifted quadratic loss.
+
+        Because A is diagonal, this is:
+            0.5 * sum_i a_i * (x_i - c_i)^2
+        """
+
+        x = task_state.parameters
+        shifted = x - self.center
+        return 0.5 * torch.sum(self.diagonal * shifted * shifted)
+
+    def info(self) -> TaskInfo:
+        """
+        Return a compact summary of the shifted quadratic task.
+        """
+
+        return TaskInfo(
+            name=self.name,
+            horizon=self.horizon,
+            metadata={
+                "dimension": self.config.dimension,
+                "center": self.center.detach().cpu().tolist(),
+                "diagonal": self.diagonal.detach().cpu().tolist(),
+            },
+        )
+
+
+class HimmelblauTask(BaseTask):
+    """
+    Two-dimensional Himmelblau function:
+
+        f(x, y) = (x^2 + y - 11)^2 + (x + y^2 - 7)^2
+
+    Properties
+    ----------
+    - non-convex
+    - multiple global minima
+    - minimum value is 0
+    - always nonnegative
+
+    Why this is a good held-out test
+    --------------------------------
+    It is geometrically different from both quadratics and Rosenbrock, while
+    still being compatible with the current log-based reward and observation
+    design because the loss remains nonnegative.
+    """
+
+    def __init__(
+        self,
+        config: AnalyticalTaskConfig,
+        name: str = "himmelblau",
+    ) -> None:
+        if config.dimension != 2:
+            raise ValueError("HimmelblauTask currently requires dimension=2.")
+
+        super().__init__(name=name, horizon=config.horizon)
+        self.config = config
+
+    def reset(self, seed: int | None = None) -> TaskState:
+        """
+        Sample a fresh initial point for Himmelblau's function.
+        """
+
+        generator = torch.Generator(device=self.config.device)
+        if seed is not None:
+            generator.manual_seed(seed)
+
+        x0 = self.config.init_scale * torch.randn(
+            2,
+            generator=generator,
+            device=self.config.device,
+            dtype=self.config.dtype,
+        )
+
+        return TaskState(
+            parameters=torch.nn.Parameter(x0),
+            step_index=0,
+            metadata={"task_name": self.name},
+        )
+
+    def compute_loss(self, task_state: TaskState) -> torch.Tensor:
+        """
+        Compute Himmelblau's function value.
+        """
+
+        x, y = task_state.parameters[0], task_state.parameters[1]
+        return (x * x + y - 11.0) ** 2 + (x + y * y - 7.0) ** 2
+
+    def info(self) -> TaskInfo:
+        """
+        Return a compact summary of the Himmelblau task.
+        """
+
+        return TaskInfo(name=self.name, horizon=self.horizon, metadata={})
+
 
 # ---------------------------------------------------------------------------
 # Convenience factory helpers
@@ -350,3 +506,63 @@ def make_saddle(
         dtype=dtype,
     )
     return SaddleTask(config=config)
+
+
+def make_shifted_quadratic(
+    center: list[float] | tuple[float, ...],
+    diagonal_values: list[float] | tuple[float, ...],
+    horizon: int = 40,
+    init_scale: float = 1.5,
+    device: str = "cpu",
+    dtype: torch.dtype = torch.float32,
+) -> ShiftedQuadraticTask:
+    """
+    Build a shifted quadratic held-out task.
+
+    Parameters
+    ----------
+    center:
+        Coordinates of the minimizer.
+    diagonal_values:
+        Positive diagonal curvature values.
+    """
+
+    if len(center) != len(diagonal_values):
+        raise ValueError("center and diagonal_values must have the same length.")
+
+    center_tensor = torch.tensor(center, dtype=dtype)
+    diagonal_tensor = torch.tensor(diagonal_values, dtype=dtype)
+
+    config = AnalyticalTaskConfig(
+        dimension=len(center),
+        horizon=horizon,
+        init_scale=init_scale,
+        device=device,
+        dtype=dtype,
+    )
+
+    return ShiftedQuadraticTask(
+        center=center_tensor,
+        diagonal=diagonal_tensor,
+        config=config,
+    )
+
+
+def make_himmelblau(
+    horizon: int = 60,
+    init_scale: float = 1.5,
+    device: str = "cpu",
+    dtype: torch.dtype = torch.float32,
+) -> HimmelblauTask:
+    """
+    Build the standard 2D Himmelblau held-out task.
+    """
+
+    config = AnalyticalTaskConfig(
+        dimension=2,
+        horizon=horizon,
+        init_scale=init_scale,
+        device=device,
+        dtype=dtype,
+    )
+    return HimmelblauTask(config=config)

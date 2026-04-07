@@ -51,6 +51,8 @@ from hanno.tasks.analytical import (
     make_anisotropic_quadratic,
     make_isotropic_quadratic,
     make_rosenbrock,
+    make_himmelblau,
+    make_shifted_quadratic
 )
 
 
@@ -230,15 +232,15 @@ def main() -> None:
         StageConfig(
             name="rosenbrock",
             task_factory=lambda: make_rosenbrock(
-                horizon=200,
+                horizon=50,
                 init_scale=1.2,
                 device=device,
             ),
             episodes=200,
             optimizer_name="adam",
-            base_lr=0.001,
-            min_lr_multiplier=0.5,
-            max_lr_multiplier=1.25,
+            base_lr=0.01,
+            min_lr_multiplier=0.1,
+            max_lr_multiplier=3,
         ),
     ]
 
@@ -285,19 +287,56 @@ def main() -> None:
                 f"instability_count={episode_info['instability_count']}"
             )
 
-    heldout_task = make_anisotropic_quadratic(
+    # ------------------------------------------------------------------
+    # Held-out analytical evaluation suite
+    # ------------------------------------------------------------------
+
+    # 1. Held-out convex test: unseen anisotropic quadratic
+    heldout_task_1 = make_anisotropic_quadratic(
         diagonal_values=[1.0, 25.0],
         horizon=40,
         init_scale=1.5,
         device=device,
     )
-    heldout_update_engine = UpdateEngine(
+    heldout_update_engine_1 = UpdateEngine(
         optimizer_name="sgd",
         base_lr=0.03,
     )
-    heldout_env = TrainingEnv(
-        task=heldout_task,
-        update_engine=heldout_update_engine,
+    heldout_env_1 = TrainingEnv(
+        task=heldout_task_1,
+        update_engine=heldout_update_engine_1,
+        reward_fn=reward_fn,
+        observation_builder=observation_builder,
+        instability_threshold=1.5,
+    )
+
+    # Quadratic-style control range
+    policy.action_mapper.min_lr_multiplier = 0.1
+    policy.action_mapper.max_lr_multiplier = 3.0
+
+    print("\\n=== Held-out test 1: unseen anisotropic quadratic ===")
+    evaluate_policy(
+        env=heldout_env_1,
+        policy=policy,
+        num_episodes=50,
+        seed_offset=50000,
+    )
+
+    # 2. Held-out convex test: shifted quadratic
+    heldout_task_2 = make_shifted_quadratic(
+        center=[2.0, -1.0],
+        diagonal_values=[1.0, 8.0],
+        horizon=40,
+        init_scale=1.5,
+        device=device,
+    )
+    heldout_update_engine_2 = UpdateEngine(
+        optimizer_name="sgd",
+        base_lr=0.03,
+    )
+    heldout_env_2 = TrainingEnv(
+        task=heldout_task_2,
+        update_engine=heldout_update_engine_2,
         reward_fn=reward_fn,
         observation_builder=observation_builder,
         instability_threshold=1.5,
@@ -306,13 +345,43 @@ def main() -> None:
     policy.action_mapper.min_lr_multiplier = 0.1
     policy.action_mapper.max_lr_multiplier = 3.0
 
+    print("\\n=== Held-out test 2: shifted quadratic ===")
     evaluate_policy(
-        env=heldout_env,
+        env=heldout_env_2,
         policy=policy,
-        num_episodes=10,
-        seed_offset=50000,
+        num_episodes=50,
+        seed_offset=60000,
     )
 
+    # 3. Held-out non-convex test: Himmelblau
+    heldout_task_3 = make_himmelblau(
+        horizon=60,
+        init_scale=1.5,
+        device=device,
+    )
+    heldout_update_engine_3 = UpdateEngine(
+        optimizer_name="adam",
+        base_lr=0.01,
+    )
+    heldout_env_3 = TrainingEnv(
+        task=heldout_task_3,
+        update_engine=heldout_update_engine_3,
+        reward_fn=reward_fn,
+        observation_builder=observation_builder,
+        instability_threshold=1.5,
+    )
+
+    # Safer non-convex control range, similar in spirit to Rosenbrock
+    policy.action_mapper.min_lr_multiplier = 0.1
+    policy.action_mapper.max_lr_multiplier = 3
+
+    print("\\n=== Held-out test 3: Himmelblau ===")
+    evaluate_policy(
+        env=heldout_env_3,
+        policy=policy,
+        num_episodes=50,
+        seed_offset=70000,
+    )
 
 if __name__ == "__main__":
     main()
