@@ -158,6 +158,35 @@ class TrainingEnv:
         # the new state, reward, and diagnostics.
         post_step_loss = self.task.compute_loss(self.task_state).detach()
 
+        if not torch.isfinite(post_step_loss):
+            self.done = True
+
+            fallback_observation = torch.zeros(
+                10,
+                dtype=torch.float32,
+                device=self.task_state.parameters.device,
+            )
+
+            info = {
+                "task_name": self.task.name,
+                "step_index": self.task_state.step_index,
+                "loss": float("inf"),
+                "grad_norm": float("inf"),
+                "update_norm": float("inf"),
+                "effective_lr": update_result.lr_effective,
+                "instability_flag": 1.0,
+                "reward_components": {"nonfinite_termination": 1.0},
+                "raw_action": (
+                    control.raw_action.detach().cpu().tolist()
+                    if control.raw_action is not None
+                    else None
+                ),
+            }
+
+            # Strong negative terminal reward so the controller learns that this
+            # action/trajectory was bad, but we do not let inf/nan propagate.
+            return fallback_observation, -10.0, True, info
+
         step_diag = compute_step_diagnostics(
             loss=post_step_loss,
             parameters=self.task_state.parameters.detach(),

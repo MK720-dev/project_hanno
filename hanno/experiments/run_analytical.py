@@ -173,7 +173,7 @@ def main() -> None:
         grad_clip_norm=1.0,
     )
 
-    num_episodes = 200
+    num_episodes = 40
 
     for episode_idx in range(1, num_episodes + 1):
         episode_seed = 1000 + episode_idx
