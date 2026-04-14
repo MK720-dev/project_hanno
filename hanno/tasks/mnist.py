@@ -35,6 +35,52 @@ from hanno.tasks.base import BaseTask, TaskInfo
 from hanno.tasks.models.mlp import MnistMLP
 
 
+class FlexibleMnistMLP(nn.Module):
+    """
+    Simple configurable MLP used to broaden the MNIST architecture family
+    without changing the rest of the Hanno stack.
+    """
+
+    def __init__(
+        self,
+        hidden_dims: tuple[int, ...],
+        input_dim: int = 28 * 28,
+        output_dim: int = 10,
+    ) -> None:
+        super().__init__()
+
+        if not hidden_dims:
+            raise ValueError("hidden_dims must contain at least one hidden layer size.")
+
+        layers: list[nn.Module] = []
+        prev_dim = input_dim
+
+        for hidden_dim in hidden_dims:
+            layers.append(nn.Linear(prev_dim, hidden_dim))
+            layers.append(nn.ReLU())
+            prev_dim = hidden_dim
+
+        layers.append(nn.Linear(prev_dim, output_dim))
+        self.network = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.view(x.size(0), -1)
+        return self.network(x)
+
+
+MNIST_MLP_VARIANTS: dict[str, tuple[int, ...] | None] = {
+    # Baseline variant keeps using the existing model class so the original
+    # proof-of-concept path remains available unchanged.
+    "small": None,
+    # Additional variants used for broader transfer experiments.
+    "narrow": (128,),
+    "wide": (512, 256),
+    "deep": (256, 128, 64),
+    "bottleneck": (256, 64),
+    "very_wide": (768, 384),
+}
+
+
 @dataclass
 class MnistTaskConfig:
     """
@@ -47,6 +93,7 @@ class MnistTaskConfig:
     data_root: str = "./data"
     shuffle: bool = True
     device: str = "cpu"
+    model_variant: str = "small"
 
 
 class MnistTask(BaseTask):
@@ -59,7 +106,16 @@ class MnistTask(BaseTask):
         config: MnistTaskConfig | None = None,
     ) -> None:
         self.config = config or MnistTaskConfig()
-        super().__init__(name="mnist_mlp", horizon=self.config.horizon)
+
+        if self.config.model_variant not in MNIST_MLP_VARIANTS:
+            valid_variants = ", ".join(sorted(MNIST_MLP_VARIANTS))
+            raise ValueError(
+                f"Unknown MNIST model_variant '{self.config.model_variant}'. "
+                f"Expected one of: {valid_variants}"
+            )
+
+        task_name = f"mnist_mlp_{self.config.model_variant}"
+        super().__init__(name=task_name, horizon=self.config.horizon)
 
         self.loss_fn = nn.CrossEntropyLoss()
 
@@ -111,6 +167,17 @@ class MnistTask(BaseTask):
         y = y.to(self.config.device)
         return x, y
 
+    def _make_model(self) -> nn.Module:
+        """
+        Build the fresh episode-local optimizee for the requested architecture
+        variant.
+        """
+
+        hidden_dims = MNIST_MLP_VARIANTS[self.config.model_variant]
+        if hidden_dims is None:
+            return MnistMLP()
+        return FlexibleMnistMLP(hidden_dims=hidden_dims)
+
     def reset(self, seed: int | None = None) -> TaskState:
         """
         Reset the MNIST task for a fresh episode.
@@ -121,7 +188,7 @@ class MnistTask(BaseTask):
         - and a cached first batch used for the initial loss/observation.
         """
 
-        model = MnistMLP().to(self.config.device)
+        model = self._make_model().to(self.config.device)
         loader = self._make_loader(seed=seed)
         batch_iter = iter(loader)
 
@@ -130,6 +197,8 @@ class MnistTask(BaseTask):
             step_index=0,
             metadata={
                 "task_name": self.name,
+                "model_variant": self.config.model_variant,
+                "model_class": model.__class__.__name__,
                 "batch_iter": batch_iter,
             },
         )
@@ -177,5 +246,6 @@ class MnistTask(BaseTask):
             metadata={
                 "batch_size": self.config.batch_size,
                 "train_split": self.config.train,
+                "model_variant": self.config.model_variant,
             },
         )
